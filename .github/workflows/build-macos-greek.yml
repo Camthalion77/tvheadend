@@ -1,0 +1,154 @@
+name: TVHeadend Greek - macOS Intel test build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Fork branch to build (Greek localization)"
+        required: true
+        default: "feature/greek-localization"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tvh-greek-macos-intel
+  cancel-in-progress: true
+
+jobs:
+  macos-intel:
+    name: Build and package for Intel Mac
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+
+    steps:
+      - name: Check out Greek branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_branch }}
+          persist-credentials: false
+
+      - name: Verify requested source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$SOURCE_BRANCH" = "feature/greek-localization"
+          test -s intl/tvheadend.el.po
+          test -s intl/docs/tvheadend.doc.el.po
+          test -s intl/js/tvheadend.js.el.po
+          test -s intl/vue/tvheadend.vue.el.po
+          git log -1 --format='%h %s'
+
+      - name: Set up Node for Vue
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/webui/static-vue/package-lock.json
+
+      - name: Install dependencies on the GitHub runner only
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install pkgconf gettext openssl@3 pcre2 uriparser dylibbundler
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix pcre2)/lib/pkgconfig:$(brew --prefix uriparser)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Validate Greek gettext catalogs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for po in \
+            intl/tvheadend.el.po \
+            intl/js/tvheadend.js.el.po \
+            intl/vue/tvheadend.vue.el.po \
+            intl/docs/tvheadend.doc.el.po; do
+            echo "Checking $po"
+            msgfmt --check -o /dev/null "$po"
+          done
+
+      - name: Configure IPTV/SAT-IP and both Web UIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure \
+            --python=python3 \
+            --enable-bundle \
+            --enable-vue_build \
+            --disable-vue_cache \
+            --disable-pcloud_cache \
+            --disable-dvbscan \
+            --disable-linuxdvb \
+            --disable-hdhomerun_static \
+            --disable-hdhomerun_client \
+            --disable-hdhomerun_server \
+            --disable-ffmpeg_static \
+            --disable-libav \
+            --disable-vaapi \
+            --disable-cwc \
+            --disable-cccam \
+            --disable-capmt \
+            --disable-constcw \
+            --disable-tvhcsa
+
+      - name: Build for macOS Intel
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j 2 LANGUAGES="el en_US"
+          test -x build.darwin/tvheadend
+          build.darwin/tvheadend --version
+          file build.darwin/tvheadend
+
+      - name: Package portable executable and dylibs
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$PWD/dist/TVHeadend-Greek-macOS-Intel"
+          mkdir -p "$OUT"
+          cp build.darwin/tvheadend "$OUT/tvheadend"
+          dylibbundler -od -b \
+            -x "$OUT/tvheadend" \
+            -d "$OUT/lib" \
+            -p '@executable_path/lib/'
+          cat > "$OUT/Start-TVHeadend.command" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          mkdir -p "$DIR/config"
+          echo "TVHeadend Greek: http://127.0.0.1:9981/"
+          echo "Ctrl+C stops the server."
+          exec "$DIR/tvheadend" -c "$DIR/config"
+          SCRIPT
+          chmod +x "$OUT/tvheadend" "$OUT/Start-TVHeadend.command"
+          cat > "$OUT/README-EL.txt" <<'README'
+          TVHeadend Greek — experimental Intel macOS server build
+
+          This is a SERVER, not a macOS .app.
+          Run Start-TVHeadend.command and open http://127.0.0.1:9981/
+          Configuration is saved in the local config/ directory.
+          Keep Terminal open; Ctrl+C stops the server.
+
+          Network IPTV and SAT>IP are the target input sources.
+          macOS DVB USB/PCI drivers and transcoding are not included.
+          The build is ad-hoc signed and is not Apple notarized.
+          Do not expose this test server to the Internet.
+          README
+          codesign --force --sign - "$OUT/tvheadend"
+          find "$OUT/lib" -type f -name '*.dylib' -exec codesign --force --sign - {} \;
+          "$OUT/tvheadend" --version
+          otool -L "$OUT/tvheadend"
+          shasum -a 256 "$OUT/tvheadend" > "$OUT/SHA256.txt"
+          ditto -c -k --keepParent "$OUT" "$PWD/dist/TVHeadend-Greek-macOS-Intel.zip"
+
+      - name: Upload portable macOS Intel build
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVHeadend-Greek-macOS-Intel
+          path: dist/TVHeadend-Greek-macOS-Intel.zip
+          if-no-files-found: error
+          retention-days: 14
