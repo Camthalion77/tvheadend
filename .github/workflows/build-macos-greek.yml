@@ -99,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make -j 2 LANGUAGES="el en_US"
+          make -j 2 LANGUAGES="el en_US" STAT_ARG='-f "%-35N %7z"'
           test -x build.darwin/tvheadend
           build.darwin/tvheadend --version
           file build.darwin/tvheadend
